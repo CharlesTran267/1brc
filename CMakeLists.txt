@@ -4,6 +4,9 @@ find_package(OpenSSL REQUIRED)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
+# set(CMAKE_CXX_COMPILER clang++-20)
+# add_compile_options(-stdlib=libc++ -fno-omit-frame-pointer -ggdb3)
+# add_link_options(-stdlib=libc++)
 
 add_executable(charles_1brc src/main.cpp)
 target_link_libraries(charles_1brc
