@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <exception>
 #include <fcntl.h>
 #include <openssl/err.h>
@@ -24,6 +25,8 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/btree_map.h>
 
 constexpr bool DEBUG = 1;
 
@@ -39,7 +42,6 @@ constexpr auto GOLDEN_OUTPUT = "output/golden_output_" SIZE_TAG ".txt";
 constexpr int NUM_THREADS = 8;
 constexpr size_t pow10(int e) { return e ? 10 * pow10(e - 1) : 1; }
 constexpr size_t INPUT_FILE_LENGTH = pow10(SIZE_EXP);
-constexpr size_t CHUNK_SIZE = INPUT_FILE_LENGTH / NUM_THREADS;
 
 constexpr auto HASH_SUF = ".hash";
 std::string sha256_file(const std::string& path, bool cache = false) {
@@ -129,6 +131,9 @@ class Solver {
 
   using Map = std::map<std::string_view, Stat>;
   using UMap = std::unordered_map<std::string_view, Stat>;
+  // using UMap = absl::flat_hash_map<std::string_view, Stat>;
+  // using Map = absl::btree_map<std::string_view, Stat>;
+  using It = std::string_view::iterator;
 
   struct Timer {
     Timer(const std::string& prefix = "")
@@ -154,23 +159,19 @@ class Solver {
     Timer timer("Total solve");
 
     if constexpr (NUM_THREADS == 1) {
-      thread_task(0, 0);
+      thread_task(0, {0, m_reader.content.end()});
       return;
     }
 
-    std::array<std::size_t, NUM_THREADS> byte_marks{};
-    byte_marks[0] = 0;
-    std::size_t cnt = 0;
-    int thread_idx = 1;
-    for (std::size_t i = 0; i < m_reader.size; ++i) {
-      if (m_reader.content[i] == '\n') {
-        cnt++;
-        if (cnt == CHUNK_SIZE) {
-          byte_marks[thread_idx++] = i + 1;
-          cnt = 0;
-          if (thread_idx == NUM_THREADS) break;
-        }
-      }
+    std::array<std::pair<It, It>, NUM_THREADS> byte_marks{};
+    std::size_t chunk = m_reader.size / NUM_THREADS;
+    byte_marks.front().first = m_reader.content.begin();
+    byte_marks.back().second = m_reader.content.end();
+    for (std::size_t i = 1; i < NUM_THREADS; i++) {
+      It start_byte = byte_marks[i - 1].first + chunk + 1;
+      while ((*start_byte) != '\n') start_byte++;
+      byte_marks[i].first = start_byte + 1;
+      byte_marks[i - 1].second = byte_marks[i].first - 1;
     }
 
     for (std::size_t i = 0; i < NUM_THREADS; ++i) {
@@ -183,12 +184,17 @@ class Solver {
     }
   }
 
-  void thread_task(std::size_t idx, std::size_t byte_mark) {
+  void thread_task(std::size_t idx, std::pair<It, It> bm) {
     Timer timer("Time to process " + std::to_string(idx));
-    auto start_it = m_reader.content.data() + byte_mark;
-    for (int i = 0; i < CHUNK_SIZE && start_it < m_reader.content.end(); ++i) {
-      auto end_it = std::find(start_it, m_reader.content.end(), '\n');
-      auto deli_it = std::find(start_it, end_it, ';');
+    auto start_it = bm.first;
+    auto end_it = start_it, deli_it = start_it;
+
+    while (start_it < bm.second) {
+      while (*end_it != '\n') {
+        if (*end_it == ';') deli_it = end_it;
+        end_it++;
+      }
+
       std::string_view name(start_it, deli_it - start_it);
       std::string_view val_str(deli_it + 1, end_it - deli_it - 1);
       double val;
@@ -204,7 +210,8 @@ class Solver {
       } else {
         m_maps[idx].emplace(name, Stat{val, val, val, 1});
       }
-      start_it = end_it + 1;
+      end_it++;
+      start_it = end_it;
     }
   }
 
