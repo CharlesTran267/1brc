@@ -1,6 +1,7 @@
 project(charles_1brc)
 
 find_package(OpenSSL REQUIRED)
+find_package(absl REQUIRED)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
@@ -10,5 +11,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 add_executable(charles_1brc src/main.cpp)
 target_link_libraries(charles_1brc
-  PRIVATE OpenSSL::Crypto
+  PRIVATE 
+  OpenSSL::Crypto
+  absl::flat_hash_map
+  absl::btree
 )
