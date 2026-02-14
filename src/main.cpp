@@ -1,32 +1,14 @@
 #include <cstdint>
-#include <exception>
-#include <fcntl.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-
-#include <algorithm>
-#include <array>
-#include <charconv>
-#include <chrono>
-#include <cstddef>
-#include <cstring>
-#include <fstream>
 #include <iomanip>
-#include <ios>
 #include <iostream>
-#include <iterator>
 #include <map>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 #include <unordered_map>
-#include <vector>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/btree_map.h>
+
+#include "helpers.cpp"
+#include "file_reader.cpp"
 
 constexpr bool DEBUG = 1;
 
@@ -35,104 +17,31 @@ constexpr bool DEBUG = 1;
 #define STR_(x) #x
 #define XSTR_(x) STR_(x)
 #define SIZE_TAG "1e" XSTR_(SIZE_EXP)
+#define USE_STL 0
 
 constexpr auto INPUT_FILE = "input/measurements_" SIZE_TAG ".txt";
 constexpr auto OUTPUT_FILE = "output/processed_output_" SIZE_TAG ".txt";
 constexpr auto GOLDEN_OUTPUT = "output/golden_output_" SIZE_TAG ".txt";
-constexpr int NUM_THREADS = 8;
+constexpr int NUM_THREADS = 1;
 constexpr size_t pow10(int e) { return e ? 10 * pow10(e - 1) : 1; }
 constexpr size_t INPUT_FILE_LENGTH = pow10(SIZE_EXP);
 
-constexpr auto HASH_SUF = ".hash";
-std::string sha256_file(const std::string& path, bool cache = false) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) throw std::runtime_error("Cannot open file: " + path);
-
-  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-  if (!ctx) throw std::runtime_error("EVP_MD_CTX_new failed");
-
-  if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-    EVP_MD_CTX_free(ctx);
-    throw std::runtime_error("EVP_DigestInit_ex failed");
-  }
-
-  constexpr size_t BUF = 1 << 20;  // 1 MB
-  std::vector<char> buf(BUF);
-
-  while (f) {
-    f.read(buf.data(), buf.size());
-    std::streamsize n = f.gcount();
-    if (n > 0) {
-      if (EVP_DigestUpdate(ctx, buf.data(), (size_t)n) != 1) {
-        EVP_MD_CTX_free(ctx);
-        throw std::runtime_error("EVP_DigestUpdate failed");
-      }
-    }
-  }
-
-  std::string digest;
-  digest.resize(32);
-  unsigned int len = 0;
-  if (EVP_DigestFinal_ex(ctx, (unsigned char*)digest.data(), &len) != 1 ||
-      len != 32) {
-    EVP_MD_CTX_free(ctx);
-    throw std::runtime_error("EVP_DigestFinal_ex failed");
-  }
-
-  EVP_MD_CTX_free(ctx);
-  if (cache) {
-    std::ofstream of(path + HASH_SUF);
-    of << digest;
-  }
-  return digest;
-}
-
-struct FileReader {
-  int fd;
-  std::size_t size;
-  std::string_view content;
-
-  FileReader(const std::string& file) {
-    fd = ::open(file.data(), O_RDONLY);
-    if (fd < 0) {
-      throw std::runtime_error("Failed to open file");
-    }
-
-    struct stat st{};
-    if (::fstat(fd, &st) != 0) {
-      ::close(fd);
-      throw std::runtime_error("Failed to get file status");
-    }
-
-    size = static_cast<std::size_t>(st.st_size);
-    if (size == 0) throw std::runtime_error("File is empty");
-
-    void* p = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (p == MAP_FAILED) throw std::runtime_error("mmap failed!");
-
-    content = std::string_view(static_cast<char*>(p), size);
-  }
-
-  ~FileReader() {
-    if (fd >= 0) ::close(fd);
-    if (content.data() != nullptr) {
-      munmap(const_cast<char*>(content.data()), size);
-    }
-  }
-};
-
 class Solver {
   struct Stat {
-    double min;
-    double max;
-    double sum;
-    int count;
+    int16_t min;
+    int16_t max;
+    int32_t sum;
+    uint16_t count;
   };
 
-  using Map = std::map<std::string_view, Stat>;
-  using UMap = std::unordered_map<std::string_view, Stat>;
-  // using UMap = absl::flat_hash_map<std::string_view, Stat>;
-  // using Map = absl::btree_map<std::string_view, Stat>;
+  using K = std::string_view;
+#if USE_STL
+  using Map = std::map<K, Stat>;
+  using UMap = std::unordered_map<K, Stat>;
+#else
+  using Map = absl::btree_map<K, Stat>;
+  using UMap = absl::flat_hash_map<K, Stat>;
+#endif
   using It = std::string_view::iterator;
 
   struct Timer {
@@ -159,7 +68,7 @@ class Solver {
     Timer timer("Total solve");
 
     if constexpr (NUM_THREADS == 1) {
-      thread_task(0, {0, m_reader.content.end()});
+      thread_task(0, {m_reader.content.begin(), m_reader.content.end()});
       return;
     }
 
@@ -197,8 +106,7 @@ class Solver {
 
       std::string_view name(start_it, deli_it - start_it);
       std::string_view val_str(deli_it + 1, end_it - deli_it - 1);
-      double val;
-      auto [ptr, erc] = std::from_chars(val_str.begin(), val_str.end(), val);
+      int16_t val = from_chars_op(val_str.begin(), val_str.end());
 
       auto it = m_maps[idx].find(name);
       if (it != m_maps[idx].end()) {
@@ -241,24 +149,14 @@ class Solver {
     out << std::fixed << std::setprecision(1) << '{';
     for (auto it = combined_map.begin(); it != combined_map.end(); it++) {
       const auto& e = *it;
-      out << e.first << '=' << e.second.min << '/'
-          << e.second.sum / e.second.count << '/' << e.second.max;
+      out << e.first << '=' << ((float)e.second.min) / 100 << '/'
+          << ((float)e.second.sum) / (e.second.count * 100) << '/'
+          << ((float)e.second.max) / 100;
       if (std::next(it) != combined_map.end())
         out << ", ";
       else
         out << "}\n";
     }
-  }
-
-  static bool compare(const std::string& output_file,
-                      const std::string& golden_output) {
-    std::ifstream f(golden_output + HASH_SUF);
-    if (f) {
-      return sha256_file(output_file) ==
-             std::string(std::istreambuf_iterator<char>(f),
-                         std::istreambuf_iterator<char>());
-    }
-    return sha256_file(output_file) == sha256_file(golden_output);
   }
 
  private:
@@ -274,7 +172,7 @@ int main(int argc, char* argv[]) {
   try {
     Solver solver(INPUT_FILE);
     solver.write(OUTPUT_FILE);
-    if (!solver.compare(OUTPUT_FILE, GOLDEN_OUTPUT)) {
+    if (!compare(OUTPUT_FILE, GOLDEN_OUTPUT)) {
       std::cout << "OUTPUT does NOT match GOLDEN_OUTPUT\n";
     } else {
       std::cout << "OUTPUT matches GOLDEN_OUTPUT\n";
