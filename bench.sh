@@ -2,23 +2,54 @@
 # Benchmark the solver. Reports min-of-N of its own "Total solve" timer:
 # interference is one-sided, so the minimum is the least-contaminated estimate.
 #
-# Pinned to CPUs 4-11 = the 8 E-cores. Homogeneous and no SMT siblings, so every
-# thread does comparable work. CPUs 0-3 are 2 HT P-cores at a different clock and
-# IPC; mixing core types is what makes the per-thread times spread ~40%.
-# Usage: ./bench.sh [runs]      PERF=1 ./bench.sh   also dumps counters
+# Pins exactly one CPU per thread, fastest first: P-cores (one SMT thread per
+# physical core), then E-cores, then leftover SMT siblings. Override with CPUS=...
+# Caveat: past 2 threads the pool mixes P and E cores, which spreads per-thread
+# times ~40%; the static split makes the whole run wait on the slowest core.
+# Usage: ./bench.sh [-t threads] [runs]      PERF=1 ./bench.sh   also dumps counters
 set -e
+
+T=""
+while getopts t: opt; do
+  case $opt in
+    t) T=$OPTARG ;;
+    *) echo "usage: $0 [-t threads] [runs]" >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
 N=${1:-3}
+
+# -t reconfigures with -DNUM_THREADS; without it, drop any cached override
+if [ -n "$T" ]; then
+  cmake -B build -DNUM_THREADS="$T" > /dev/null
+else
+  cmake -B build -U NUM_THREADS > /dev/null
+fi
 
 # rebuild first: benching a stale binary is the easiest way to draw a wrong conclusion.
 # not piped, so `set -e` still catches a compile error.
 cmake --build build -j"$(nproc)"
 
-CPUS=${CPUS:-4-11}
+# one line per logical cpu: "<cpu> <core_id> <max_freq>"; pick one cpu per
+# physical core in descending freq, append SMT siblings last, take first T.
+if [ -z "$CPUS" ]; then
+  CPUS=$(for c in /sys/devices/system/cpu/cpu[0-9]*; do
+      echo "${c##*/cpu} $(cat "$c/topology/core_id") $(cat "$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || echo 0)"
+    done | sort -k3,3nr -k1,1n \
+    | awk -v n="${T:-8}" '
+        !seen[$2]++ { pri = pri " " $1; next }
+                    { smt = smt " " $1 }
+        END {
+          split(pri smt, cpu, " ")
+          for (i = 1; i <= n && i in cpu; i++) out = out (i > 1 ? "," : "") cpu[i]
+          print out
+        }')
+fi
 BIN=./build/charles_1brc
 TAG=1e$(sed -n 's/^#define SIZE_EXP \([0-9]*\).*/\1/p' src/main.cpp)
 
 cat "input/measurements_$TAG.txt" > /dev/null   # warm page cache; cold-read noise dwarfs everything else
-echo "$TAG, cpus $CPUS, $N runs"
+echo "$TAG, cpus $CPUS, threads ${T:-8}, $N runs"
 
 best=""
 i=1
