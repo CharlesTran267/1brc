@@ -16,3 +16,7 @@ target_link_libraries(charles_1brc
   absl::flat_hash_map
   absl::btree
 )
+
+if(DEFINED NUM_THREADS)
+  target_compile_definitions(charles_1brc PRIVATE NUM_THREADS=${NUM_THREADS})
+endif()
