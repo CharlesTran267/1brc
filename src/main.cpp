@@ -10,7 +10,9 @@
 #include "helpers.cpp"
 #include "file_reader.cpp"
 
-constexpr bool DEBUG = 1;
+#ifndef DEBUG
+#define DEBUG
+#endif
 
 // dataset size: 10^SIZE_EXP rows. Must match what gen.py produced.
 #define SIZE_EXP 8
@@ -19,10 +21,13 @@ constexpr bool DEBUG = 1;
 #define SIZE_TAG "1e" XSTR_(SIZE_EXP)
 #define USE_STL 0
 
+#ifndef NUM_THREADS
+#define NUM_THREADS 8
+#endif
+
 constexpr auto INPUT_FILE = "input/measurements_" SIZE_TAG ".txt";
 constexpr auto OUTPUT_FILE = "output/processed_output_" SIZE_TAG ".txt";
 constexpr auto GOLDEN_OUTPUT = "output/golden_output_" SIZE_TAG ".txt";
-constexpr int NUM_THREADS = 1;
 constexpr size_t pow10(int e) { return e ? 10 * pow10(e - 1) : 1; }
 constexpr size_t INPUT_FILE_LENGTH = pow10(SIZE_EXP);
 
@@ -48,8 +53,6 @@ class Solver {
     Timer(const std::string& prefix = "")
         : m_pre(prefix), start(std::chrono::high_resolution_clock::now()) {}
     ~Timer() {
-      if constexpr (!DEBUG) return;
-
       // count in milliseconds
       auto end = std::chrono::high_resolution_clock::now();
       double duration =
@@ -94,7 +97,10 @@ class Solver {
   }
 
   void thread_task(std::size_t idx, std::pair<It, It> bm) {
+#ifdef DEBUG
     Timer timer("Time to process " + std::to_string(idx));
+#endif
+
     auto start_it = bm.first;
     auto end_it = start_it, deli_it = start_it;
 
@@ -124,7 +130,9 @@ class Solver {
   }
 
   void write(const std::string& output_file) {
+#ifdef DEBUG
     Timer timer("Write time");
+#endif
 
     Map combined_map;
     for (auto& m : m_maps) {
