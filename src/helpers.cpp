@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <openssl/evp.h>
 #include <openssl/types.h>
@@ -75,4 +76,15 @@ int16_t from_chars_op(std::string_view::iterator b,
   }
   if (ans < 1000) ans *= 10;
   return neg ? -ans : ans;
+}
+
+uint64_t lazy_hash(std::string_view name) {
+  uint64_t f = 0, e = 0;
+  if (name.size() >= 8) {
+    std::memcpy(&f, name.data(), 8);
+    std::memcpy(&e, name.data() + name.size() - 8, 8);
+    return f ^ (e << 1);  // <bit>; rotl not <<, keeps all 64 bits
+  }
+  std::memcpy(&f, name.data(), name.size());  // short name: bytes ARE the key
+  return f;
 }
