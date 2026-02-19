@@ -1,5 +1,11 @@
 project(charles_1brc)
 
+# bench.sh reconfigures this dir; make sure a fresh cache never falls back to -O0
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+add_compile_options(-march=native)
+
 find_package(OpenSSL REQUIRED)
 find_package(absl REQUIRED)
 
