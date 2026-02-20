@@ -19,16 +19,12 @@ done
 shift $((OPTIND - 1))
 N=${1:-3}
 
-# -t reconfigures with -DNUM_THREADS; without it, drop any cached override
-if [ -n "$T" ]; then
-  cmake -B build -DNUM_THREADS="$T" > /dev/null
-else
-  cmake -B build -U NUM_THREADS > /dev/null
-fi
-
-# rebuild first: benching a stale binary is the easiest way to draw a wrong conclusion.
-# not piped, so `set -e` still catches a compile error.
-cmake --build build -j"$(nproc)"
+# Own build dir, wiped every run: never inherits a stale cache (a Debug build/
+# or a leftover NUM_THREADS), and a compile error stops the bench via set -e.
+BDIR=build-bench
+rm -rf "$BDIR"
+cmake -B "$BDIR" -DCMAKE_BUILD_TYPE=Release ${T:+-DNUM_THREADS="$T"} -DDEBUG=0> /dev/null
+cmake --build "$BDIR" -j"$(nproc)"
 
 # one line per logical cpu: "<cpu> <core_id> <max_freq>"; pick one cpu per
 # physical core in descending freq, append SMT siblings last, take first T.
@@ -45,7 +41,7 @@ if [ -z "$CPUS" ]; then
           print out
         }')
 fi
-BIN=./build/charles_1brc
+BIN=./$BDIR/charles_1brc
 TAG=1e$(sed -n 's/^#define SIZE_EXP \([0-9]*\).*/\1/p' src/main.cpp)
 
 cat "input/measurements_$TAG.txt" > /dev/null   # warm page cache; cold-read noise dwarfs everything else
@@ -54,7 +50,7 @@ echo "$TAG, cpus $CPUS, threads ${T:-8}, $N runs"
 best=""
 i=1
 while [ "$i" -le "$N" ]; do
-  ms=$(taskset -c "$CPUS" "$BIN" | sed -n 's/^Total solve:\([0-9.]*\) ms/\1/p')
+  ms=$(taskset -c "$CPUS" "$BIN" | sed -n 's/^Total time:\([0-9.]*\) ms/\1/p')
   echo "  run $i: $ms ms"
   best=$(printf '%s\n%s\n' "$best" "$ms" | grep . | sort -n | head -1)
   i=$((i + 1))
