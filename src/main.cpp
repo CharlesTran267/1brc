@@ -32,6 +32,8 @@ constexpr auto GOLDEN_OUTPUT = "output/golden_output_" SIZE_TAG ".txt";
 constexpr size_t pow10(int e) { return e ? 10 * pow10(e - 1) : 1; }
 constexpr size_t INPUT_FILE_LENGTH = pow10(SIZE_EXP);
 
+constexpr auto MAX_STATION = 10000;
+
 #if USE_STL
 template <class K, class V>
 using Map = std::map<K, V>;
@@ -68,8 +70,8 @@ class Solver {
   struct Stat {
     int16_t min;
     int16_t max;
-    int32_t sum;
-    uint16_t count;
+    uint32_t count;
+    int64_t sum;
     std::string_view sv;
   };
 
@@ -136,7 +138,7 @@ class Solver {
         st.max = std::max(st.max, val);
         st.min = std::min(st.min, val);
       } else {
-        m_maps[idx].emplace(h, Stat{val, val, val, 1, name});
+        m_maps[idx].emplace(h, Stat{val, val, 1, val, name});
       }
       end_it++;
       start_it = end_it;
@@ -147,13 +149,13 @@ class Solver {
     Map<std::string_view, Stat> combined_map;
     {
 #ifdef DEBUG
-      Timer timer("Aggregated time");
+      Timer timer("Aggregate time");
 #endif
       for (auto& m : m_maps) {
         for (auto& [h, v] : m) {
           auto it = combined_map.find(v.sv);
           if (it == combined_map.end()) {
-            combined_map[v.sv] = {v.min, v.max, v.sum, v.count, v.sv};
+            combined_map[v.sv] = {v.min, v.max, v.count, v.sum, v.sv};
             continue;
           }
           combined_map[v.sv].count += v.count;

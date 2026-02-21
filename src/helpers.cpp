@@ -83,7 +83,7 @@ uint64_t lazy_hash(std::string_view name) {
   if (name.size() >= 8) {
     std::memcpy(&f, name.data(), 8);
     std::memcpy(&e, name.data() + name.size() - 8, 8);
-    return f ^ (e << 1);  // <bit>; rotl not <<, keeps all 64 bits
+    return f ^ (e << 1);
   }
   std::memcpy(&f, name.data(), name.size());  // short name: bytes ARE the key
   return f;
