@@ -1,15 +1,11 @@
-#include <cstdint>
 #include <iomanip>
 #include <iostream>
-#include <map>
 #include <string>
 #include <thread>
-#include <unordered_map>
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/btree_map.h>
 
 #include "helpers.cpp"
 #include "file_reader.cpp"
+#include "flat_hash_map.cpp"
 
 #ifndef DEBUG
 #define DEBUG 1
@@ -20,10 +16,15 @@
 #define STR_(x) #x
 #define XSTR_(x) STR_(x)
 #define SIZE_TAG "1e" XSTR_(SIZE_EXP)
-#define USE_STL 0
+#ifndef CONTAINER_TYPE
+#define CONTAINER_TYPE 2  // 0 for stl, 1 for absl, 2 for own
+#endif
+#ifndef MAP_SZ
+#define MAP_SZ (1 << 16)  // own-map slots; 10k stations -> 61% load.
+#endif
 
 #ifndef NUM_THREADS
-#define NUM_THREADS 1
+#define NUM_THREADS 8
 #endif
 
 constexpr auto INPUT_FILE = "input/measurements_" SIZE_TAG ".txt";
@@ -34,16 +35,29 @@ constexpr size_t INPUT_FILE_LENGTH = pow10(SIZE_EXP);
 
 constexpr auto MAX_STATION = 10000;
 
-#if USE_STL
+#if CONTAINER_TYPE == 0
+#include <map>
+#include <unordered_map>
+
 template <class K, class V>
 using Map = std::map<K, V>;
 template <class K, class V>
 using UMap = std::unordered_map<K, V>;
-#else
+#elif CONTAINER_TYPE == 1
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/btree_map.h>
+
 template <class K, class V>
 using Map = absl::btree_map<K, V>;
 template <class K, class V>
 using UMap = absl::flat_hash_map<K, V>;
+#else
+#include <absl/container/btree_map.h>
+
+template <class K, class V>
+using Map = absl::btree_map<K, V>;
+template <class K, class V, std::size_t SZ, auto fn>
+using UMap = FlatHashMap<K, V, SZ, fn>;
 #endif
 
 using sit = std::string_view::iterator;
@@ -66,18 +80,25 @@ struct Timer {
   std::chrono::high_resolution_clock::time_point start;
 };
 
+// lazy_hash's low bits are near-raw name bytes; one multiply spreads them or
+// linear probing clusters badly (measured: avg 115 probes/lookup vs 1.1).
+uint64_t mix_hash(uint64_t h) { return (h * 0x9E3779B97F4A7C15ULL) >> 48; }
+
 class Solver {
-  struct Stat {
+  struct Stat {  // 16B: key+Stat = 32B slot, two per cache line, never split.
     int16_t min;
     int16_t max;
     uint32_t count;
     int64_t sum;
-    std::string_view sv;
   };
 
   using K = uint64_t;
   using SMap = Map<K, Stat>;
+#if CONTAINER_TYPE == 2
+  using SUMap = UMap<K, Stat, MAP_SZ, mix_hash>;
+#else
   using SUMap = UMap<K, Stat>;
+#endif
 
  public:
   Solver(const std::string& file_name) : m_reader(file_name) {
@@ -120,28 +141,36 @@ class Solver {
     auto end_it = start_it, deli_it = start_it;
 
     while (start_it < bm.second) {
-      while (*end_it != '\n') {
-        if (*end_it == ';') deli_it = end_it;
-        end_it++;
-      }
+      // memchr is AVX2 in glibc: scans the name (the long part) 32B at a time.
+      deli_it =
+          static_cast<sit>(std::memchr(start_it, ';', bm.second - start_it));
+      // temp is 3-5 bytes, so '\n' sits at deli+4..deli+6: <=2 scalar steps.
+      end_it = deli_it + 4;
+      while (*end_it != '\n') end_it++;
 
       std::string_view name(start_it, deli_it - start_it);
       std::string_view val_str(deli_it + 1, end_it - deli_it - 1);
       int16_t val = from_chars_op(val_str.begin(), val_str.end());
 
       auto h = lazy_hash(name);
+#if CONTAINER_TYPE == 2
+      // fresh slot inits {val, val, 0, 0}; the shared update makes
+      // {val,val,1,val}
+      Stat& st = m_maps[idx].upsert(h, val, val, 0, 0);
+#else
       auto it = m_maps[idx].find(h);
-      if (it != m_maps[idx].end()) {
-        Stat& st = it->second;
-        st.count++;
-        st.sum += val;
-        st.max = std::max(st.max, val);
-        st.min = std::min(st.min, val);
-      } else {
-        m_maps[idx].emplace(h, Stat{val, val, 1, val, name});
-      }
-      end_it++;
-      start_it = end_it;
+      if (it == m_maps[idx].end())
+        it = m_maps[idx].emplace(h, Stat{val, val, 0, 0}).first;
+      Stat& st = it->second;
+#endif
+      // fresh slot (count still 0): remember the name once, off the hot path
+      if (st.count == 0) [[unlikely]]
+        m_names[idx].emplace(h, name);
+      st.count++;
+      st.sum += val;
+      st.max = std::max(st.max, val);
+      st.min = std::min(st.min, val);
+      start_it = end_it + 1;
     }
   }
 
@@ -152,16 +181,17 @@ class Solver {
       Timer timer("Aggregate time");
 #endif
       for (auto& m : m_maps) {
-        for (auto& [h, v] : m) {
-          auto it = combined_map.find(v.sv);
+        for (auto&& [h, v] : m) {
+          auto sv = m_names[&m - m_maps.data()].at(h);
+          auto it = combined_map.find(sv);
           if (it == combined_map.end()) {
-            combined_map[v.sv] = {v.min, v.max, v.count, v.sum, v.sv};
+            combined_map[sv] = {v.min, v.max, v.count, v.sum};
             continue;
           }
-          combined_map[v.sv].count += v.count;
-          combined_map[v.sv].sum += v.sum;
-          combined_map[v.sv].min = std::min(combined_map[v.sv].min, v.min);
-          combined_map[v.sv].max = std::max(combined_map[v.sv].max, v.max);
+          combined_map[sv].count += v.count;
+          combined_map[sv].sum += v.sum;
+          combined_map[sv].min = std::min(combined_map[sv].min, v.min);
+          combined_map[sv].max = std::max(combined_map[sv].max, v.max);
         }
       }
     }
@@ -190,7 +220,8 @@ class Solver {
  private:
   FileReader m_reader;
   std::array<SUMap, NUM_THREADS> m_maps;
-  std::array<UMap<uint64_t, std::string_view>, NUM_THREADS> m_name_maps;
+  std::array<std::unordered_map<uint64_t, std::string_view>, NUM_THREADS>
+      m_names;  // cold: written ~10k times, read only at merge
   std::array<std::thread, NUM_THREADS> m_thread_pool;
 };
 
