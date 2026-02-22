@@ -23,11 +23,13 @@ target_link_libraries(charles_1brc
   absl::btree
 )
 
-if(DEFINED NUM_THREADS)
-  target_compile_definitions(charles_1brc PRIVATE NUM_THREADS=${NUM_THREADS})
-endif()
+foreach(v NUM_THREADS CONTAINER_TYPE MAP_SZ)
+  if(DEFINED ${v})
+    target_compile_definitions(charles_1brc PRIVATE ${v}=${${v}})
+  endif()
+endforeach()
 
 # not in ALL: bench.sh's from-scratch build stays fast.
 # run: cmake --build build --target hash_test && ./build/hash_test
-add_executable(hash_test EXCLUDE_FROM_ALL tests/hash_test.cpp)
+add_executable(hash_test tests/hash_test.cpp)
 target_link_libraries(hash_test PRIVATE OpenSSL::Crypto)
