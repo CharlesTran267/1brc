@@ -6,7 +6,9 @@
 # physical core), then E-cores, then leftover SMT siblings. Override with CPUS=...
 # Caveat: past 2 threads the pool mixes P and E cores, which spreads per-thread
 # times ~40%; the static split makes the whole run wait on the slowest core.
-# Usage: ./bench.sh [-t threads] [runs]      PERF=1 ./bench.sh   also dumps counters
+# Usage: ./bench.sh [-t threads] [runs] [-- cmake-args...]
+#   e.g.  ./bench.sh -t 8 3 -- -DCONTAINER_TYPE=1 -DMAP_SZ=65536
+#   PERF=1 ./bench.sh   also dumps counters
 set -e
 
 T=""
@@ -17,7 +19,10 @@ while getopts t: opt; do
   esac
 done
 shift $((OPTIND - 1))
-N=${1:-3}
+N=3
+case ${1:-} in ''|--) ;; *) N=$1; shift ;; esac
+[ "${1:-}" = "--" ] && shift
+# remaining args ("$@") are forwarded to the cmake configure line
 
 # Own build dir, wiped every run: never inherits a stale cache (a Debug build/
 # or a leftover NUM_THREADS), and a compile error stops the bench via set -e.
@@ -45,7 +50,7 @@ BIN=./$BDIR/charles_1brc
 TAG=1e$(sed -n 's/^#define SIZE_EXP \([0-9]*\).*/\1/p' src/main.cpp)
 
 cat "input/measurements_$TAG.txt" > /dev/null   # warm page cache; cold-read noise dwarfs everything else
-echo "$TAG, cpus $CPUS, threads ${T:-8}, $N runs"
+echo "$TAG, cpus $CPUS, threads ${T:-8}, $N runs${1:+, cmake: $*}"
 
 best=""
 i=1
