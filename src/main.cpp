@@ -2,6 +2,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <atomic>
 
 #include "helpers.cpp"
 #include "file_reader.cpp"
@@ -107,23 +108,12 @@ class Solver {
 #endif
 
     if constexpr (NUM_THREADS == 1) {
-      thread_task(0, {m_reader.content.begin(), m_reader.content.end()});
+      process_range(0, m_reader.content.begin(), m_reader.content.end());
       return;
     }
 
-    std::array<psv, NUM_THREADS> byte_marks{};
-    std::size_t chunk = m_reader.size / NUM_THREADS;
-    byte_marks.front().first = m_reader.content.begin();
-    byte_marks.back().second = m_reader.content.end();
-    for (std::size_t i = 1; i < NUM_THREADS; i++) {
-      auto start_byte = byte_marks[i - 1].first + chunk + 1;
-      while ((*start_byte) != '\n') start_byte++;
-      byte_marks[i].first = start_byte + 1;
-      byte_marks[i - 1].second = byte_marks[i].first - 1;
-    }
-
     for (std::size_t i = 0; i < NUM_THREADS; ++i) {
-      auto t = std::thread(&Solver::thread_task, this, i, byte_marks[i]);
+      auto t = std::thread(&Solver::thread_task, this, i);
       m_thread_pool[i] = std::move(t);
     }
 
@@ -132,18 +122,45 @@ class Solver {
     }
   }
 
-  void thread_task(std::size_t idx, psv bm) {
+  // Threads pull fixed-size chunks off an atomic cursor: fast cores take more
+  // chunks, so nobody waits on the slowest core at the end (P/E hybrid).
+  static constexpr std::size_t CHUNK_BYTES = 2 << 20;
+
+  void thread_task(std::size_t idx) {
 #ifdef DEBUG
     Timer timer("Time to process " + std::to_string(idx));
 #endif
+    const char* base = m_reader.content.data();
+    const std::size_t size = m_reader.size;
+    for (;;) {
+      std::size_t begin =
+          m_cursor.fetch_add(CHUNK_BYTES, std::memory_order_relaxed);
+      if (begin >= size) break;
+      std::size_t end = std::min(begin + CHUNK_BYTES, size);
+      // a thread owns the lines that START inside its chunk; the last one may
+      // run past `end`. First owned line starts right after the first '\n' at
+      // or after begin-1 (begin 0 owns from byte 0).
+      const char* s = base;
+      if (begin) {
+        s = static_cast<const char*>(
+            std::memchr(base + begin - 1, '\n', end - begin + 1));
+        if (!s) continue;  // chunk entirely inside one line
+        s += 1;
+      }
+      process_range(idx, s, base + end);
+    }
+  }
 
-    auto start_it = bm.first;
-    auto end_it = start_it, deli_it = start_it;
+  void process_range(std::size_t idx, const char* start_it,
+                     const char* range_end) {
+    const char* end_it = start_it;
+    const char* deli_it = start_it;
+    const char* file_end = m_reader.content.end();
 
-    while (start_it < bm.second) {
+    while (start_it < range_end) {
       // memchr is AVX2 in glibc: scans the name (the long part) 32B at a time.
       deli_it =
-          static_cast<sit>(std::memchr(start_it, ';', bm.second - start_it));
+          static_cast<sit>(std::memchr(start_it, ';', file_end - start_it));
       // temp is 3-5 bytes, so '\n' sits at deli+4..deli+6: <=2 scalar steps.
       end_it = deli_it + 4;
       while (*end_it != '\n') end_it++;
@@ -223,6 +240,7 @@ class Solver {
   std::array<std::unordered_map<uint64_t, std::string_view>, NUM_THREADS>
       m_names;  // cold: written ~10k times, read only at merge
   std::array<std::thread, NUM_THREADS> m_thread_pool;
+  std::atomic<std::size_t> m_cursor{0};
 };
 
 int main(int argc, char* argv[]) {
