@@ -51,6 +51,14 @@ class FlatHashMap {
     return iterator(this, i);
   }
 
+  // start the slot's cache-line fill now; upsert a few rows later hits it
+  void prefetch(K k) const {
+    k += !k;
+    auto i = HashFn(k) & MASK;
+    __builtin_prefetch(&m_tags[i]);
+    __builtin_prefetch(&m_buf[i]);
+  }
+
   iterator begin() { return iterator(this, 0); }
   iterator end() { return iterator(this, SZ); }
 
