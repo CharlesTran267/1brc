@@ -23,7 +23,7 @@ target_link_libraries(charles_1brc
   absl::btree
 )
 
-foreach(v NUM_THREADS CONTAINER_TYPE MAP_SZ)
+foreach(v NUM_THREADS CONTAINER_TYPE MAP_SZ BATCH)
   if(DEFINED ${v})
     target_compile_definitions(charles_1brc PRIVATE ${v}=${${v}})
   endif()
