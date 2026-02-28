@@ -23,6 +23,9 @@
 #ifndef MAP_SZ
 #define MAP_SZ (1 << 16)  // own-map slots; 10k stations -> 61% load.
 #endif
+#ifndef BATCH
+#define BATCH 8  // rows in flight per iteration; tune with -DBATCH=
+#endif
 
 #ifndef NUM_THREADS
 #define NUM_THREADS 8
@@ -151,43 +154,60 @@ class Solver {
     }
   }
 
+  struct Row {
+    uint64_t h;
+    std::string_view name;
+    int16_t val;
+  };
+
   void process_range(std::size_t idx, const char* start_it,
                      const char* range_end) {
-    const char* end_it = start_it;
-    const char* deli_it = start_it;
     const char* file_end = m_reader.content.end();
+    Row batch[BATCH];
 
     while (start_it < range_end) {
-      // memchr is AVX2 in glibc: scans the name (the long part) 32B at a time.
-      deli_it =
-          static_cast<sit>(std::memchr(start_it, ';', file_end - start_it));
-      // temp is 3-5 bytes, so '\n' sits at deli+4..deli+6: <=2 scalar steps.
-      end_it = deli_it + 4;
-      while (*end_it != '\n') end_it++;
+      // Sweep A: scan + parse + hash + prefetch. Pure L1/register work, so the
+      // BATCH slot loads below overlap instead of serializing one DRAM miss
+      // per row.
+      int n = 0;
+      for (; n < BATCH && start_it < range_end; ++n) {
+        // memchr is AVX2 in glibc: scans the name (the long part) 32B at once.
+        auto deli_it =
+            static_cast<sit>(std::memchr(start_it, ';', file_end - start_it));
+        // temp is 3-5 bytes, so '\n' sits at deli+4..deli+6: <=2 scalar steps.
+        auto end_it = deli_it + 4;
+        while (*end_it != '\n') end_it++;
 
-      std::string_view name(start_it, deli_it - start_it);
-      std::string_view val_str(deli_it + 1, end_it - deli_it - 1);
-      int16_t val = from_chars_op(val_str.begin(), val_str.end());
-
-      auto h = lazy_hash(name);
+        Row& r = batch[n];
+        r.name = std::string_view(start_it, deli_it - start_it);
+        r.val = from_chars_op(deli_it + 1, end_it);
+        r.h = lazy_hash(r.name);
 #if CONTAINER_TYPE == 2
-      // fresh slot inits {val, val, 0, 0}; the shared update makes
-      // {val,val,1,val}
-      Stat& st = m_maps[idx].upsert(h, val, val, 0, 0);
-#else
-      auto it = m_maps[idx].find(h);
-      if (it == m_maps[idx].end())
-        it = m_maps[idx].emplace(h, Stat{val, val, 0, 0}).first;
-      Stat& st = it->second;
+        m_maps[idx].prefetch(r.h);
 #endif
-      // fresh slot (count still 0): remember the name once, off the hot path
-      if (st.count == 0) [[unlikely]]
-        m_names[idx].emplace(h, name);
-      st.count++;
-      st.sum += val;
-      st.max = std::max(st.max, val);
-      st.min = std::min(st.min, val);
-      start_it = end_it + 1;
+        start_it = end_it + 1;
+      }
+
+      // Sweep B: updates land on cache lines already in flight.
+      for (int j = 0; j < n; ++j) {
+        const Row& r = batch[j];
+#if CONTAINER_TYPE == 2
+        // fresh slot inits {val, val, 0, 0}; the update makes {val,val,1,val}
+        Stat& st = m_maps[idx].upsert(r.h, r.val, r.val, 0, 0);
+#else
+        auto it = m_maps[idx].find(r.h);
+        if (it == m_maps[idx].end())
+          it = m_maps[idx].emplace(r.h, Stat{r.val, r.val, 0, 0}).first;
+        Stat& st = it->second;
+#endif
+        // fresh slot (count still 0): remember the name once, off the hot path
+        if (st.count == 0) [[unlikely]]
+          m_names[idx].emplace(r.h, r.name);
+        st.count++;
+        st.sum += r.val;
+        st.max = std::max(st.max, r.val);
+        st.min = std::min(st.min, r.val);
+      }
     }
   }
 
