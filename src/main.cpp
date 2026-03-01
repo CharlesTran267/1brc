@@ -88,6 +88,22 @@ struct Timer {
 // linear probing clusters badly (measured: avg 115 probes/lookup vs 1.1).
 uint64_t mix_hash(uint64_t h) { return (h * 0x9E3779B97F4A7C15ULL) >> 48; }
 
+// merykitty's SWAR parse: all four temp layouts (-XX.X, -X.X, XX.X, X.X)
+// branchlessly from one 8-byte load. Returns tenths; sets nl to the '\n'.
+// Digits have ASCII bit 4 set; '.', '-', '\n' do not — ctz on ~w finds the dot,
+// whose position selects the shift that aligns any layout to one template.
+inline int16_t parse_temp(const char* p, const char*& nl) {
+  uint64_t w;
+  std::memcpy(&w, p, 8);
+  int64_t sgn = (~(int64_t)w << 59) >> 63;        // -1 if leading '-', else 0
+  uint64_t nosign = w & ~(uint64_t)(sgn & 0xFF);  // blank the '-' byte
+  int dot = __builtin_ctzll(~w & 0x10101000ULL);
+  uint64_t digits = (nosign << (28 - dot)) & 0x0F000F0F00ULL;
+  uint64_t abs_v = ((digits * 0x640A0001ULL) >> 32) & 0x3FF;
+  nl = p + (dot >> 3) + 2;
+  return (int16_t)((abs_v ^ sgn) - sgn);
+}
+
 class Solver {
   struct Stat {  // 16B: key+Stat = 32B slot, two per cache line, never split.
     int16_t min;
@@ -174,18 +190,15 @@ class Solver {
         // memchr is AVX2 in glibc: scans the name (the long part) 32B at once.
         auto deli_it =
             static_cast<sit>(std::memchr(start_it, ';', file_end - start_it));
-        // temp is 3-5 bytes, so '\n' sits at deli+4..deli+6: <=2 scalar steps.
-        auto end_it = deli_it + 4;
-        while (*end_it != '\n') end_it++;
-
         Row& r = batch[n];
+        const char* nl;
+        r.val = parse_temp(deli_it + 1, nl);  // finds the '\n' as a side effect
         r.name = std::string_view(start_it, deli_it - start_it);
-        r.val = from_chars_op(deli_it + 1, end_it);
         r.h = lazy_hash(r.name);
 #if CONTAINER_TYPE == 2
         m_maps[idx].prefetch(r.h);
 #endif
-        start_it = end_it + 1;
+        start_it = nl + 1;
       }
 
       // Sweep B: updates land on cache lines already in flight.
@@ -244,9 +257,9 @@ class Solver {
     out << std::fixed << std::setprecision(1) << '{';
     for (auto it = combined_map.begin(); it != combined_map.end(); it++) {
       const auto& e = *it;
-      out << e.first << '=' << ((float)e.second.min) / 100 << '/'
-          << ((float)e.second.sum) / (e.second.count * 100) << '/'
-          << ((float)e.second.max) / 100;
+      out << e.first << '=' << ((float)e.second.min) / 10 << '/'
+          << ((float)e.second.sum) / (e.second.count * 10) << '/'
+          << ((float)e.second.max) / 10;
       if (std::next(it) != combined_map.end())
         out << ", ";
       else
