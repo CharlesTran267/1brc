@@ -24,6 +24,10 @@ struct FileReader {
 
     size = static_cast<std::size_t>(st.st_size);
     if (size == 0) throw std::runtime_error("File is empty");
+    // SWAR parsing overreads <=7B past the final '\n'; those bytes exist only
+    // in the zero-fill of the last partial page.
+    if ((size & 4095) == 0)
+      throw std::runtime_error("page-aligned input size; append 1 byte");
 
     void* p = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (p == MAP_FAILED) throw std::runtime_error("mmap failed!");
