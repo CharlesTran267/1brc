@@ -3,6 +3,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <immintrin.h>
 
 #include "helpers.cpp"
 #include "file_reader.cpp"
@@ -87,6 +88,18 @@ struct Timer {
 // lazy_hash's low bits are near-raw name bytes; one multiply spreads them or
 // linear probing clusters badly (measured: avg 115 probes/lookup vs 1.1).
 uint64_t mix_hash(uint64_t h) { return (h * 0x9E3779B97F4A7C15ULL) >> 48; }
+
+// One SSE compare covers names up to 16B (nearly all of them); the loop is
+// the fallback for longer names. No call overhead, unlike memchr.
+inline const char* find_semi(const char* p) {
+  const __m128i semi = _mm_set1_epi8(';');
+  for (;;) {
+    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    int m = _mm_movemask_epi8(_mm_cmpeq_epi8(v, semi));
+    if (m) return p + __builtin_ctz(m);
+    p += 16;
+  }
+}
 
 // merykitty's SWAR parse: all four temp layouts (-XX.X, -X.X, XX.X, X.X)
 // branchlessly from one 8-byte load. Returns tenths; sets nl to the '\n'.
@@ -187,9 +200,7 @@ class Solver {
       // per row.
       int n = 0;
       for (; n < BATCH && start_it < range_end; ++n) {
-        // memchr is AVX2 in glibc: scans the name (the long part) 32B at once.
-        auto deli_it =
-            static_cast<sit>(std::memchr(start_it, ';', file_end - start_it));
+        auto deli_it = find_semi(start_it);
         Row& r = batch[n];
         const char* nl;
         r.val = parse_temp(deli_it + 1, nl);  // finds the '\n' as a side effect
