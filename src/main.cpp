@@ -13,7 +13,7 @@
 #define DEBUG 1
 #endif
 
-// dataset size: 10^SIZE_EXP rows. Must match what gen.py produced.
+// 10^SIZE_EXP rows, keep in sync with gen.py
 #define SIZE_EXP 9
 #define STR_(x) #x
 #define XSTR_(x) STR_(x)
@@ -22,10 +22,10 @@
 #define CONTAINER_TYPE 2  // 0 for stl, 1 for absl, 2 for own
 #endif
 #ifndef MAP_SZ
-#define MAP_SZ (1 << 16)  // own-map slots; 10k stations -> 61% load.
+#define MAP_SZ (1 << 16)  // 64k slots for ~10k stations
 #endif
 #ifndef BATCH
-#define BATCH 8  // rows in flight per iteration; tune with -DBATCH=
+#define BATCH 8  // rows in flight, tune with -DBATCH=
 #endif
 
 #ifndef NUM_THREADS
@@ -72,7 +72,6 @@ struct Timer {
   Timer(const std::string& prefix = "")
       : m_pre(prefix), start(std::chrono::high_resolution_clock::now()) {}
   ~Timer() {
-    // count in milliseconds
     auto end = std::chrono::high_resolution_clock::now();
     double duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
@@ -85,12 +84,10 @@ struct Timer {
   std::chrono::high_resolution_clock::time_point start;
 };
 
-// lazy_hash's low bits are near-raw name bytes; one multiply spreads them or
-// linear probing clusters badly (measured: avg 115 probes/lookup vs 1.1).
+// spread the bits before masking, identity hash clusters badly (115 probes vs 1.1)
 uint64_t mix_hash(uint64_t h) { return (h * 0x9E3779B97F4A7C15ULL) >> 48; }
 
-// One SSE compare covers names up to 16B (nearly all of them); the loop is
-// the fallback for longer names. No call overhead, unlike memchr.
+// one sse compare covers most names, no memchr call overhead
 inline const char* find_semi(const char* p) {
   const __m128i semi = _mm_set1_epi8(';');
   for (;;) {
@@ -101,15 +98,12 @@ inline const char* find_semi(const char* p) {
   }
 }
 
-// merykitty's SWAR parse: all four temp layouts (-XX.X, -X.X, XX.X, X.X)
-// branchlessly from one 8-byte load. Returns tenths; sets nl to the '\n'.
-// Digits have ASCII bit 4 set; '.', '-', '\n' do not — ctz on ~w finds the dot,
-// whose position selects the shift that aligns any layout to one template.
+// merykitty's swar parse: one load, no branches, returns tenths and the newline
 inline int16_t parse_temp(const char* p, const char*& nl) {
   uint64_t w;
   std::memcpy(&w, p, 8);
-  int64_t sgn = (~(int64_t)w << 59) >> 63;        // -1 if leading '-', else 0
-  uint64_t nosign = w & ~(uint64_t)(sgn & 0xFF);  // blank the '-' byte
+  int64_t sgn = (~(int64_t)w << 59) >> 63;        // -1 if leading '-'
+  uint64_t nosign = w & ~(uint64_t)(sgn & 0xFF);
   int dot = __builtin_ctzll(~w & 0x10101000ULL);
   uint64_t digits = (nosign << (28 - dot)) & 0x0F000F0F00ULL;
   uint64_t abs_v = ((digits * 0x640A0001ULL) >> 32) & 0x3FF;
@@ -118,7 +112,7 @@ inline int16_t parse_temp(const char* p, const char*& nl) {
 }
 
 class Solver {
-  struct Stat {  // 16B: key+Stat = 32B slot, two per cache line, never split.
+  struct Stat {  // 16B so a slot stays inside one cache line
     int16_t min;
     int16_t max;
     uint32_t count;
@@ -154,8 +148,7 @@ class Solver {
     }
   }
 
-  // Threads pull fixed-size chunks off an atomic cursor: fast cores take more
-  // chunks, so nobody waits on the slowest core at the end (P/E hybrid).
+  // fast cores just grab more chunks, no stragglers
   static constexpr std::size_t CHUNK_BYTES = 2 << 20;
 
   void thread_task(std::size_t idx) {
@@ -169,9 +162,7 @@ class Solver {
           m_cursor.fetch_add(CHUNK_BYTES, std::memory_order_relaxed);
       if (begin >= size) break;
       std::size_t end = std::min(begin + CHUNK_BYTES, size);
-      // a thread owns the lines that START inside its chunk; the last one may
-      // run past `end`. First owned line starts right after the first '\n' at
-      // or after begin-1 (begin 0 owns from byte 0).
+      // own the lines that start in this chunk, last one may run past end
       const char* s = base;
       if (begin) {
         s = static_cast<const char*>(
@@ -195,15 +186,13 @@ class Solver {
     Row batch[BATCH];
 
     while (start_it < range_end) {
-      // Sweep A: scan + parse + hash + prefetch. Pure L1/register work, so the
-      // BATCH slot loads below overlap instead of serializing one DRAM miss
-      // per row.
+      // sweep A: parse a batch and prefetch the slots
       int n = 0;
       for (; n < BATCH && start_it < range_end; ++n) {
         auto deli_it = find_semi(start_it);
         Row& r = batch[n];
         const char* nl;
-        r.val = parse_temp(deli_it + 1, nl);  // finds the '\n' as a side effect
+        r.val = parse_temp(deli_it + 1, nl);
         r.name = std::string_view(start_it, deli_it - start_it);
         r.h = lazy_hash(r.name);
 #if CONTAINER_TYPE == 2
@@ -212,11 +201,10 @@ class Solver {
         start_it = nl + 1;
       }
 
-      // Sweep B: updates land on cache lines already in flight.
+      // sweep B: update against lines already in flight
       for (int j = 0; j < n; ++j) {
         const Row& r = batch[j];
 #if CONTAINER_TYPE == 2
-        // fresh slot inits {val, val, 0, 0}; the update makes {val,val,1,val}
         Stat& st = m_maps[idx].upsert(r.h, r.val, r.val, 0, 0);
 #else
         auto it = m_maps[idx].find(r.h);
@@ -224,7 +212,7 @@ class Solver {
           it = m_maps[idx].emplace(r.h, Stat{r.val, r.val, 0, 0}).first;
         Stat& st = it->second;
 #endif
-        // fresh slot (count still 0): remember the name once, off the hot path
+        // first time seeing this station, remember the name
         if (st.count == 0) [[unlikely]]
           m_names[idx].emplace(r.h, r.name);
         st.count++;
