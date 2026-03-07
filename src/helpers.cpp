@@ -85,6 +85,6 @@ uint64_t lazy_hash(std::string_view name) {
     std::memcpy(&e, name.data() + name.size() - 8, 8);
     return f ^ (e << 1);
   }
-  std::memcpy(&f, name.data(), name.size());  // short name: bytes ARE the key
+  std::memcpy(&f, name.data(), name.size());  // short name: the bytes are the key
   return f;
 }

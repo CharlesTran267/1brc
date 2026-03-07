@@ -24,8 +24,7 @@ struct FileReader {
 
     size = static_cast<std::size_t>(st.st_size);
     if (size == 0) throw std::runtime_error("File is empty");
-    // SWAR parsing overreads <=7B past the final '\n'; those bytes exist only
-    // in the zero-fill of the last partial page.
+    // swar overreads past the last newline, only the page zero-fill makes that safe
     if ((size & 4095) == 0 || (size & 4095) > 4080)
       throw std::runtime_error("input size within 16B of a page boundary; "
                                "append a byte so SWAR overreads stay mapped");

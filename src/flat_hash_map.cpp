@@ -14,9 +14,7 @@ class FlatHashMap {
  public:
   FlatHashMap() : m_buf(SZ + 1), m_tags(SZ + 1, 0) {}
 
-  // 64KB tag filter, L2-resident: probe reads 1 byte and touches the slot
-  // array only on a tag hit -- same idea as absl's control bytes, minus SIMD.
-  // |1 keeps a real tag from colliding with 0 = empty.
+  // 64KB tag filter, like absl's control bytes minus the simd. |1 so 0 stays "empty"
   static uint8_t tag_of(K k) { return uint8_t(k >> 32) | 1; }
 
   class iterator {
@@ -51,7 +49,7 @@ class FlatHashMap {
     return iterator(this, i);
   }
 
-  // start the slot's cache-line fill now; upsert a few rows later hits it
+  // start pulling the slot's cache line now, upsert hits it later
   void prefetch(K k) const {
     k += !k;
     auto i = HashFn(k) & MASK;
@@ -62,8 +60,7 @@ class FlatHashMap {
   iterator begin() { return iterator(this, 0); }
   iterator end() { return iterator(this, SZ); }
 
-  // hot-path: one probe, no iterator, no re-compare. Returns existing value
-  // or default-constructs V(args...) in the slot first.
+  // hot path: one probe, returns the value slot
   template <class... Args>
   V& upsert(K k, Args&&... args) {
     k += !k;
