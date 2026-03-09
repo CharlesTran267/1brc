@@ -14,7 +14,9 @@
 #endif
 
 // 10^SIZE_EXP rows, keep in sync with gen.py
+#ifndef SIZE_EXP
 #define SIZE_EXP 9
+#endif
 #define STR_(x) #x
 #define XSTR_(x) STR_(x)
 #define SIZE_TAG "1e" XSTR_(SIZE_EXP)
@@ -285,11 +287,12 @@ int main(int argc, char* argv[]) {
     }
     if (!compare(OUTPUT_FILE, GOLDEN_OUTPUT)) {
       std::cout << "OUTPUT does NOT match GOLDEN_OUTPUT\n";
-    } else {
-      std::cout << "OUTPUT matches GOLDEN_OUTPUT\n";
+      return 1;
     }
+    std::cout << "OUTPUT matches GOLDEN_OUTPUT\n";
   } catch (const std::exception& err) {
     std::cout << "Failed to solve:" << err.what() << '\n';
+    return 2;
   }
 
   return 0;
