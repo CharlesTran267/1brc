@@ -1,0 +1,21 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev libabsl-dev
+
+      # SIZE_EXP=0 -> the tiny checked-in fixture, not the 1e9 input
+      - run: cmake -S . -B build -DSIZE_EXP=0 -DNUM_THREADS=4
+      - run: cmake --build build --target charles_1brc hash_test -j
+
+      - name: correctness
+        run: ./build/charles_1brc
+
+      - name: hash collisions
+        run: ./build/hash_test tests/stations_10k.txt
