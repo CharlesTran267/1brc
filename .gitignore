@@ -3,3 +3,7 @@ build/*
 output/*
 input/*
 build-bench/
+
+# tiny CI fixture, tracked on purpose
+!input/measurements_1e0.txt
+!output/golden_output_1e0.txt

@@ -1,0 +1,12 @@
+Ho Chi Minh City;12.3
+Abha;-4.5
+Zürich;99.9
+Abha;0.0
+Ho Chi Minh City;-7.1
+Zürich;-99.9
+A;5.0
+Yellowknife;1.2
+Abha;4.5
+Zürich;0.0
+Yellowknife;-1.2
+Ho Chi Minh City;0.8
